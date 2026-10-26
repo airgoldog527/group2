@@ -7,13 +7,9 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from config import HEADER_FORMAT, HEADER_SIZE, CRC_SIZE, TCP_PORT
+from config import HEADER_FORMAT, HEADER_SIZE, CRC_SIZE, TCP_PORT , HOST_IP
 from protocol import parse_frame_packet
 from transport import TCPTransport
-
-
-# 你的電腦區域網路 IP
-HOST = "192.168.1.3"
 
 # 已經測試成功的 YOLO 模型
 MODEL_PATH = "yolo26n.pt"
@@ -42,9 +38,9 @@ def main():
         print("[YOLO] 模型載入完成")
 
         # 2. 建立 TCP 伺服器並等待朋友連線
-        server_transport = TCPTransport(HOST, TCP_PORT)
+        server_transport = TCPTransport(HOST_IP, TCP_PORT)
 
-        print(f"[Server] 監聽 {HOST}:{TCP_PORT}")
+        print(f"[Server] 監聽 {HOST_IP}:{TCP_PORT}")
         print("[Server] 等待 Client 連線...")
 
         client_transport = server_transport.listen()
