@@ -80,3 +80,7 @@ MAX_PAYLOAD_SIZE = 64 * 1024 * 1024
 
 # 影格編號允許的最大值，供連續影片傳輸使用
 MAX_FRAME_ID = 0xFFFFFFFF
+
+# 每秒取幾幀
+RGB_FPS = 10
+GRAY_FPS = 10
