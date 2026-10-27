@@ -1,4 +1,3 @@
-python
 import cv2
 import time
 
@@ -117,4 +116,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
