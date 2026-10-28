@@ -1,166 +1,221 @@
+
 import socket
-import struct
+import threading
 import time
-from datetime import datetime
+
 import cv2
 import numpy as np
 
 from config import (
     TCP_PORT,
-    HEADER_FORMAT,
     HEADER_SIZE,
-    CRC_SIZE,
     PIXEL_FORMAT_GRAY8,
     PIXEL_FORMAT_BGR24,
     PIXEL_FORMAT_RGB24,
 )
-from protocol import parse_frame_packet
+from protocol import StreamReceiver
 
+# 第四台電腦：同時接收彩色影片與分析文字
 HOST = "0.0.0.0"
+VIDEO_PORT = TCP_PORT       # 預設 5000
+TEXT_PORT = TCP_PORT + 1    # 預設 5001
 
-def recv_exact(sock, n_bytes):
-    """確保完整接收 n 個位元組"""
-    data = bytearray()
-    while len(data) < n_bytes:
-        chunk = sock.recv(n_bytes - len(data))
-        if not chunk:
-            return None
-        data.extend(chunk)
-    return bytes(data)
+# 兩條連線共用的最新資料
+lock = threading.Lock()
+latest_frame = None
+latest_result = "等待第三台傳送分析結果..."
+latest_frame_id = 0
+latest_result_frame_id = 0
+running = True
 
-def draw_ui_overlay(img, fps):
-    """最穩定的文字疊加方式"""
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fps_str = f"FPS: {fps:.1f}"
 
-    # 除錯印出：確認有跑進來，並確認當前影像形狀與型態
-    print(f"[DEBUG UI] 正在繪製 UI -> 影像形狀: {img.shape}, dtype: {img.dtype}, FPS: {fps:.1f}")
+def receive_video():
+    """接收第一台傳來的 FRAME 封包。"""
+    global latest_frame, latest_frame_id, running
 
-    # 1. 直接畫一個實心黑色底塊 (左上角 10,10 到 450,90)
-    cv2.rectangle(img, (10, 10), (450, 90), (0, 0, 0), -1)
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, VIDEO_PORT))
+    server.listen(5)
 
-    # 2. 畫亮綠色 FPS 文字
-    cv2.putText(
-        img,
-        fps_str,
-        (25, 45),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (0, 255, 0),
-        2,
-        cv2.LINE_AA,
-    )
+    print(f"[影片] 等待第一台連線：Port {VIDEO_PORT}")
 
-    # 3. 畫亮黃色時間文字
-    cv2.putText(
-        img,
-        current_time_str,
-        (25, 75),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
-    return img
+    while running:
+        conn, addr = server.accept()
+        print(f"[影片] 已連線：{addr}")
+        receiver = StreamReceiver()
+
+        with conn:
+            while running:
+                data = conn.recv(65536)
+                if not data:
+                    break
+
+                receiver.feed(data)
+
+                for packet in receiver.extract_packets():
+                    if packet["type_name"] != "FRAME":
+                        continue
+
+                    width = packet["width"]
+                    height = packet["height"]
+                    fmt = packet["pixel_format"]
+                    payload = packet["payload"]
+
+                    if fmt == PIXEL_FORMAT_BGR24:
+                        frame = np.frombuffer(
+                            payload, dtype=np.uint8
+                        ).reshape(height, width, 3).copy()
+
+                    elif fmt == PIXEL_FORMAT_RGB24:
+                        rgb = np.frombuffer(
+                            payload, dtype=np.uint8
+                        ).reshape(height, width, 3)
+                        frame = cv2.cvtColor(
+                            rgb, cv2.COLOR_RGB2BGR
+                        )
+
+                    elif fmt == PIXEL_FORMAT_GRAY8:
+                        gray = np.frombuffer(
+                            payload, dtype=np.uint8
+                        ).reshape(height, width)
+                        frame = cv2.cvtColor(
+                            gray, cv2.COLOR_GRAY2BGR
+                        )
+
+                    else:
+                        continue
+
+                    with lock:
+                        latest_frame = frame
+                        latest_frame_id = packet["frame_id"]
+
+        print("[影片] 傳送端已斷線，等待重新連線")
+
+    server.close()
+
+
+def receive_text():
+    """接收第三台傳來的 TEXT 封包。"""
+    global latest_result, latest_result_frame_id, running
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, TEXT_PORT))
+    server.listen(5)
+
+    print(f"[文字] 等待第三台連線：Port {TEXT_PORT}")
+
+    while running:
+        conn, addr = server.accept()
+        print(f"[文字] 已連線：{addr}")
+        receiver = StreamReceiver()
+
+        with conn:
+            while running:
+                data = conn.recv(65536)
+                if not data:
+                    break
+
+                receiver.feed(data)
+
+                for packet in receiver.extract_packets():
+                    if packet["type_name"] != "TEXT":
+                        continue
+
+                    message = packet["message"]
+                    frame_id = packet["frame_id"]
+
+                    with lock:
+                        latest_result = message
+                        latest_result_frame_id = frame_id
+
+                    print(f"[分析結果][Frame {frame_id}] {message}")
+
+        print("[文字] 傳送端已斷線，等待重新連線")
+
+    server.close()
+
 
 def main():
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_sock.bind((HOST, TCP_PORT))
-    server_sock.listen(1)
+    global running
 
-    print(f"[*] Display Server 啟動成功，監聽連接埠 (Port): {TCP_PORT}")
-    print("[*] 等待傳送端 (192.168.1.2) 連線...")
+    # 兩個接收工作各自運行，互不阻塞
+    video_thread = threading.Thread(
+        target=receive_video, daemon=True
+    )
+    text_thread = threading.Thread(
+        target=receive_text, daemon=True
+    )
 
-    while True:
-        try:
-            client_sock, client_addr = server_sock.accept()
-            print(f"[+] 收到連線來自：{client_addr}")
+    video_thread.start()
+    text_thread.start()
 
-            # FPS 計算變數
-            prev_time = time.time()
-            fps = 0.0
+    print("[第四台] 等待影片與分析結果")
+    print("按 Q 結束顯示")
 
-            while True:
-                # 1. 讀取 Header
-                header_data = recv_exact(client_sock, HEADER_SIZE)
-                if not header_data:
-                    print("[-] 對方中斷連線")
-                    break
+    try:
+        while True:
+            with lock:
+                frame = (
+                    latest_frame.copy()
+                    if latest_frame is not None
+                    else None
+                )
+                result = latest_result
+                frame_id = latest_frame_id
+                result_id = latest_result_frame_id
 
-                # 2. 解析 Header 取出 payload_size
-                header_fields = struct.unpack(HEADER_FORMAT, header_data)
-                payload_size = header_fields[7]
+            if frame is None:
+                canvas = np.zeros((480, 800, 3), dtype=np.uint8)
+                cv2.putText(
+                    canvas, "Waiting for color video...",
+                    (30, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (0, 255, 255), 2
+                )
+            else:
+                canvas = frame
 
-                # 3. 讀取 Payload 與 CRC
-                tail_data = recv_exact(client_sock, payload_size + CRC_SIZE)
-                if not tail_data:
-                    print("[-] 封包接收不完整")
-                    break
+            # 顯示最新分析結果
+            lines = result.splitlines() or ["(空白結果)"]
+            y = 30
 
-                # 4. 解析封包（防護非 FRAME 封包中斷連線）
-                full_packet = header_data + tail_data
-                try:
-                    frame = parse_frame_packet(full_packet)
-                except ValueError as ve:
-                    print(f"[*] 收到非影像封包已忽略: {ve}")
-                    continue
-                except Exception as e:
-                    print(f"[!] 封包解析失敗: {e}")
-                    continue
+            cv2.rectangle(
+                canvas, (5, 5),
+                (min(canvas.shape[1] - 5, 900),
+                 min(canvas.shape[0] - 5, 40 + 30 * len(lines))),
+                (0, 0, 0), -1
+            )
 
-                if not frame:
-                    continue
+            cv2.putText(
+                canvas,
+                f"Video Frame: {frame_id} | Result Frame: {result_id}",
+                (15, 25), cv2.FONT_HERSHEY_SIMPLEX,
+                0.55, (0, 255, 255), 1, cv2.LINE_AA
+            )
 
-                # 注意：以下這 4 行必須與 try/except 同層級，且在判斷 fmt 之前執行
-                width = frame["width"]
-                height = frame["height"]
-                fmt = frame["pixel_format"]
-                payload = frame["payload"]
+            for line in lines[:8]:
+                y += 25
+                cv2.putText(
+                    canvas, line[:100],
+                    (15, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 255, 0), 2, cv2.LINE_AA
+                )
 
-                # 5. 還原為影像 Array
-                if fmt == PIXEL_FORMAT_BGR24:
-                    img = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3)).copy()
-                elif fmt == PIXEL_FORMAT_RGB24:
-                    img_rgb = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, 3))
-                    img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                elif fmt == PIXEL_FORMAT_GRAY8:
-                    img_gray = np.frombuffer(payload, dtype=np.uint8).reshape((height, width))
-                    img = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
-                else:
-                    print(f"[!] 未支援的像素格式: {fmt}")
-                    continue
+            cv2.imshow("Computer 4 - Color Video + Analysis", canvas)
 
-                # ★關鍵：強制複製一份獨立且連續的記憶體，確保可被寫入
-                img = np.ascontiguousarray(img.copy())
+            if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q")):
+                break
 
-                # 6. 計算即時 FPS
-                curr_time = time.time()
-                time_diff = curr_time - prev_time
-                if time_diff > 0:
-                    current_instant_fps = 1.0 / time_diff
-                    fps = 0.9 * fps + 0.1 * current_instant_fps if fps > 0 else current_instant_fps
-                prev_time = curr_time
+            time.sleep(0.001)
 
-                # 7. 疊加 UI
-                img = draw_ui_overlay(img, fps)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        running = False
+        cv2.destroyAllWindows()
+        print("[第四台] 顯示程式結束")
 
-                # 8. 顯示視窗
-                cv2.imshow("Live Video Stream", img)
-
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    print("[*] 結束顯示")
-                    return
-
-        except Exception as err:
-            import traceback
-            print(f"[!] 發生異常：{err}")
-            traceback.print_exc()
-        finally:
-            if 'client_sock' in locals():
-                client_sock.close()
-            cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
