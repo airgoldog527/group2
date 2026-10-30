@@ -31,9 +31,15 @@ from client_text import YOLOTextSender
 
 # True  ：本機測試，連接 local_test_display.py
 # False ：正式連線，連接第四台電腦
+
 LOCAL_TEST_MODE = False
 
+
 if LOCAL_TEST_MODE:
+
+    # --------------------------------------------------------
+    # 本機測試目的地
+    # --------------------------------------------------------
 
     VIDEO_DEST_IP = "127.0.0.1"
     VIDEO_DEST_PORT = 5002
@@ -41,13 +47,21 @@ if LOCAL_TEST_MODE:
     TEXT_DEST_IP = "127.0.0.1"
     TEXT_DEST_PORT = 5003
 
+    print("[設定] 本機測試模式")
+
 else:
+
+    # --------------------------------------------------------
+    # 正式連線目的地
+    # --------------------------------------------------------
 
     VIDEO_DEST_IP = VIDEO_TARGET_IP
     VIDEO_DEST_PORT = VIDEO_TARGET_PORT
 
     TEXT_DEST_IP = TARGET_IP
     TEXT_DEST_PORT = TARGET_PORT
+
+    print("[設定] 正式連線模式")
 
 
 # ============================================================
@@ -71,6 +85,10 @@ def main():
     print("YOLO Video Server")
     print("=" * 60)
 
+    # --------------------------------------------------------
+    # 顯示目前執行模式
+    # --------------------------------------------------------
+
     if LOCAL_TEST_MODE:
         print("[模式] 本機測試模式")
     else:
@@ -84,6 +102,11 @@ def main():
     print(
         f"[文字目的地] "
         f"{TEXT_DEST_IP}:{TEXT_DEST_PORT}"
+    )
+
+    print(
+        f"[伺服器監聽] "
+        f"{HOST_IP}:{TCP_PORT}"
     )
 
     # --------------------------------------------------------
@@ -106,9 +129,12 @@ def main():
         model = YOLO(MODEL_PATH)
 
         if torch.cuda.is_available():
+
             device = 0
             print("[YOLO] 使用 GPU")
+
         else:
+
             device = "cpu"
             print("[YOLO] 使用 CPU")
 
@@ -126,8 +152,11 @@ def main():
             )
 
             if text_sender.start_connection():
+
                 print("[文字] 連線成功")
+
             else:
+
                 print("[文字] 連線失敗，暫停文字傳送")
                 text_sender = None
 
@@ -157,6 +186,7 @@ def main():
             print(f"[影像] 連線錯誤：{e}")
 
             if video_sender is not None:
+
                 try:
                     video_sender.close()
                 except Exception:
@@ -261,7 +291,7 @@ def main():
                 ).reshape(height, width)
 
                 # --------------------------------------------
-                # 7. 將原始影像傳送給第四台
+                # 7. 傳送原始影像
                 # --------------------------------------------
 
                 if video_sender is not None:
@@ -352,7 +382,7 @@ def main():
                         })
 
                 # --------------------------------------------
-                # 10. 傳送 YOLO 文字結果給第四台
+                # 10. 傳送 YOLO 文字結果
                 # --------------------------------------------
 
                 if text_sender is not None:
