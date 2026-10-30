@@ -9,8 +9,6 @@ from ultralytics import YOLO
 from config import (
     TCP_PORT,
     HOST_IP,
-    VIDEO_TARGET_IP,
-    VIDEO_TARGET_PORT,
     TARGET_IP,
     TARGET_PORT,
 )
@@ -29,8 +27,8 @@ from client_text import YOLOTextSender
 # 本機測試 / 正式連線設定
 # ============================================================
 
-# True  ：本機測試，連接 local_test_display.py
-# False ：正式連線，連接第四台電腦
+# True  ：本機測試，傳送灰階影片與 YOLO 文字
+# False ：正式連線，只傳送 YOLO 文字
 
 LOCAL_TEST_MODE = False
 
@@ -47,7 +45,7 @@ if LOCAL_TEST_MODE:
     TEXT_DEST_IP = "127.0.0.1"
     TEXT_DEST_PORT = 5003
 
-    print("[設定] 本機測試模式")
+    print("[設定] 本機測試模式：傳送影像與文字")
 
 else:
 
@@ -55,13 +53,13 @@ else:
     # 正式連線目的地
     # --------------------------------------------------------
 
-    VIDEO_DEST_IP = VIDEO_TARGET_IP
-    VIDEO_DEST_PORT = VIDEO_TARGET_PORT
+    VIDEO_DEST_IP = None
+    VIDEO_DEST_PORT = None
 
     TEXT_DEST_IP = TARGET_IP
     TEXT_DEST_PORT = TARGET_PORT
 
-    print("[設定] 正式連線模式")
+    print("[設定] 正式連線模式：只傳送 YOLO 文字")
 
 
 # ============================================================
@@ -94,10 +92,16 @@ def main():
     else:
         print("[模式] 正式連線模式")
 
-    print(
-        f"[影像目的地] "
-        f"{VIDEO_DEST_IP}:{VIDEO_DEST_PORT}"
-    )
+    if LOCAL_TEST_MODE:
+
+        print(
+            f"[影像目的地] "
+            f"{VIDEO_DEST_IP}:{VIDEO_DEST_PORT}"
+        )
+
+    else:
+
+        print("[影像目的地] 不傳送灰階影片")
 
     print(
         f"[文字目的地] "
@@ -167,32 +171,39 @@ def main():
 
         # ----------------------------------------------------
         # 3. 建立影像傳送連線
+        #    只有本機測試模式才建立
         # ----------------------------------------------------
 
-        try:
+        if LOCAL_TEST_MODE:
 
-            video_sender = TCPTransport(
-                VIDEO_DEST_IP,
-                VIDEO_DEST_PORT,
-                timeout=5.0,
-            )
+            try:
 
-            video_sender.connect()
+                video_sender = TCPTransport(
+                    VIDEO_DEST_IP,
+                    VIDEO_DEST_PORT,
+                    timeout=5.0,
+                )
 
-            print("[影像] 連線成功")
+                video_sender.connect()
 
-        except Exception as e:
+                print("[影像] 本機測試連線成功")
 
-            print(f"[影像] 連線錯誤：{e}")
+            except Exception as e:
 
-            if video_sender is not None:
+                print(f"[影像] 本機測試連線錯誤：{e}")
 
-                try:
-                    video_sender.close()
-                except Exception:
-                    pass
+                if video_sender is not None:
 
-            video_sender = None
+                    try:
+                        video_sender.close()
+                    except Exception:
+                        pass
+
+                video_sender = None
+
+        else:
+
+            print("[影像] 正式模式不傳送灰階影片")
 
         # ----------------------------------------------------
         # 4. 建立第一台電腦的影像接收伺服器
@@ -291,10 +302,11 @@ def main():
                 ).reshape(height, width)
 
                 # --------------------------------------------
-                # 7. 傳送原始影像
+                # 7. 傳送灰階影像
+                #    只有本機測試模式才傳送
                 # --------------------------------------------
 
-                if video_sender is not None:
+                if LOCAL_TEST_MODE and video_sender is not None:
 
                     try:
 
@@ -392,6 +404,12 @@ def main():
                         text_sender.send_yolo_results(
                             frame_id=frame_id,
                             objects=detected_items,
+                        )
+
+                        print(
+                            f"[文字] 已傳送 YOLO 結果 "
+                            f"Frame ID={frame_id} "
+                            f"物件數={len(detected_items)}"
                         )
 
                     except Exception as e:
