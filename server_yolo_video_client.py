@@ -7,15 +7,19 @@ import torch
 from ultralytics import YOLO
 
 from config import TCP_PORT, HOST_IP
-from protocol import StreamReceiver, PIXEL_FORMAT_GRAY8
+from protocol import (
+    StreamReceiver,
+    PIXEL_FORMAT_GRAY8,
+    create_text_packet,
+)
 from transport import TCPTransport
-from protocol import create_text_packet
 from client_text import YOLOTextSender
 
-# 已經測試成功的 YOLO 模型
+
+# YOLO 模型路徑
 MODEL_PATH = "yolo26n.pt"
 
-# 視窗標題
+# OpenCV 視窗標題
 WINDOW_NAME = "FPGA / TCP / YOLO Overlay"
 
 # 每次從 TCP 接收的最大資料量
@@ -23,7 +27,7 @@ RECV_SIZE = 65536
 
 
 def main():
-    server_transport = TCPTransport(HOST_IP, TCP_PORT)
+    server_transport = None
     client_transport = None
     text_sender = None
 
@@ -41,13 +45,15 @@ def main():
         model = YOLO(MODEL_PATH)
 
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA 不可用，停止執行。")
+            raise RuntimeError(
+                "CUDA 不可用，請確認 NVIDIA GPU 與 PyTorch CUDA 環境。"
+            )
 
         print(f"[YOLO] GPU: {torch.cuda.get_device_name(0)}")
         print("[YOLO] 模型載入完成")
 
         # ==================================================
-        # 2. 新增：連線至文字接收端 TCP 5001
+        # 2. 連線至電腦 C 的文字接收端 TCP 5001
         # ==================================================
 
         print("[TEXT] 正在連線至文字接收端...")
@@ -55,20 +61,24 @@ def main():
         text_sender = YOLOTextSender()
 
         if not text_sender.start_connection():
-            raise ConnectionError(
-                "無法連線至文字接收端，請確認 TCP 5001"
+            print(
+                "[TEXT] 無法連線至 C 的 TCP 5001，"
+                "先繼續執行 YOLO"
             )
 
-        print("[TEXT] 文字傳送端連線成功")
+            # 文字連線失敗時，仍然可以執行影像辨識
+            try:
+                text_sender.close_connection()
+            except Exception:
+                pass
+
+            text_sender = None
+
+        else:
+            print("[TEXT] 文字傳送端連線成功")
 
         # ==================================================
-        # 3. 原本的影格接收連線，以下保留你的原始程式
-        # ==================================================
-
-        # 從這裡接回你原本的 TCPTransport 連線程式
-
-        # ==================================================
-        # 2. 建立 TCP Server
+        # 3. 建立 TCP Server，接收電腦 A 的影像
         # ==================================================
 
         server_transport = TCPTransport(HOST_IP, TCP_PORT)
@@ -78,13 +88,13 @@ def main():
 
         client_transport = server_transport.listen()
 
-        print("[Server] 連線成功！")
+        print("[Server] 影像連線成功！")
         print("[Overlay] 按 Q 關閉視窗並停止接收")
 
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
         # ==================================================
-        # 3. 初始化統計資料與串流接收器
+        # 4. 初始化統計資料與串流接收器
         # ==================================================
 
         frame_count = 0
@@ -95,7 +105,7 @@ def main():
         receiver = StreamReceiver()
 
         # ==================================================
-        # 4. 持續接收 TCP 資料並解析影格
+        # 5. 持續接收 TCP 資料並解析影格
         # ==================================================
 
         stop_requested = False
@@ -106,20 +116,19 @@ def main():
             data = client_transport.sock.recv(RECV_SIZE)
 
             if not data:
-                print("[Server] Client 已斷線")
+                print("[Server] 影像 Client 已斷線")
                 break
 
             # 將收到的資料加入緩衝區
             receiver.feed(data)
 
-            # 取出所有已完整接收、且驗證通過的封包
+            # 取出完整封包
             for packet in receiver.extract_packets():
 
-                # 目前這個 Server 只處理影像封包
+                # 只處理影像封包
                 if packet["type_name"] != "FRAME":
                     continue
 
-                # 取得封包資訊
                 frame_id = packet["frame_id"]
                 width = packet["width"]
                 height = packet["height"]
@@ -128,7 +137,7 @@ def main():
                 payload_size = packet["payload_size"]
 
                 # ------------------------------------------
-                # 4-1. 確認影像格式為 GRAY8
+                # 5-1. 確認影像格式
                 # ------------------------------------------
 
                 if pixel_format != PIXEL_FORMAT_GRAY8:
@@ -139,7 +148,6 @@ def main():
                     )
                     continue
 
-                # GRAY8 每個像素佔 1 byte
                 expected_size = width * height
 
                 if payload_size != expected_size:
@@ -151,7 +159,7 @@ def main():
                     )
 
                 # ------------------------------------------
-                # 4-2. 將 Payload 還原成灰階影像
+                # 5-2. 將 Payload 還原成灰階影像
                 # ------------------------------------------
 
                 gray = np.frombuffer(
@@ -162,15 +170,14 @@ def main():
                     width,
                 ).copy()
 
-                # YOLO 使用 3 通道影像輸入。
-                # 灰階資料只在接收端轉換，不改變網路傳輸內容。
+                # 將灰階影像轉成 YOLO 所需的 3 通道影像
                 yolo_image = cv2.cvtColor(
                     gray,
                     cv2.COLOR_GRAY2BGR,
                 )
 
                 # ------------------------------------------
-                # 4-3. 執行 YOLO 推論
+                # 5-3. 執行 YOLO GPU 推論
                 # ------------------------------------------
 
                 inference_start = time.perf_counter()
@@ -187,11 +194,64 @@ def main():
 
                 result = results[0]
 
-                # 取得包含偵測框的影像
+                # ------------------------------------------
+                # 5-4. 整理 YOLO 偵測結果
+                # ------------------------------------------
+
+                detected_items = []
+
+                for box in result.boxes:
+                    cls_id = int(box.cls[0].item())
+                    class_name = model.names[cls_id]
+                    confidence = float(box.conf[0].item())
+
+                    xywh = [
+                        round(float(value), 1)
+                        for value in box.xywh[0].tolist()
+                    ]
+
+                    detected_items.append(
+                        f"{class_name}({confidence:.2f}) "
+                        f"xywh={xywh}"
+                    )
+
+                if detected_items:
+                    message = " | ".join(detected_items)
+                else:
+                    message = "No objects detected"
+
+                # ------------------------------------------
+                # 5-5. 建立文字封包並傳送至電腦 C
+                # ------------------------------------------
+
+                if text_sender is not None:
+                    try:
+                        text_packet = create_text_packet(
+                            message=message,
+                            frame_id=frame_id,
+                        )
+
+                        text_sender.send_yolo_packet(text_packet)
+
+                    except Exception as e:
+                        print(f"[TEXT] 傳送失敗：{e}")
+
+                        try:
+                            text_sender.close_connection()
+                        except Exception:
+                            pass
+
+                        # 連線失敗後停止傳送，但繼續執行 YOLO
+                        text_sender = None
+
+                # ------------------------------------------
+                # 5-6. 取得包含偵測框的影像
+                # ------------------------------------------
+
                 overlay = result.plot()
 
                 # ------------------------------------------
-                # 4-4. 計算處理 FPS
+                # 5-7. 計算處理 FPS
                 # ------------------------------------------
 
                 current_time = time.perf_counter()
@@ -212,7 +272,7 @@ def main():
                 frame_count += 1
 
                 # ------------------------------------------
-                # 4-5. 顯示影格編號、FPS、推論時間
+                # 5-8. 顯示影格編號、FPS、推論時間
                 # ------------------------------------------
 
                 cv2.putText(
@@ -246,7 +306,7 @@ def main():
                 )
 
                 # ------------------------------------------
-                # 4-6. 顯示即時 YOLO Overlay
+                # 5-9. 顯示即時 YOLO Overlay
                 # ------------------------------------------
 
                 cv2.imshow(WINDOW_NAME, overlay)
@@ -261,7 +321,7 @@ def main():
                     )
 
                 # ------------------------------------------
-                # 4-7. 按 Q 停止接收
+                # 5-10. 按 Q 停止接收
                 # ------------------------------------------
 
                 if cv2.waitKey(1) & 0xFF in (
@@ -282,14 +342,25 @@ def main():
         cv2.destroyAllWindows()
 
         if client_transport is not None:
-            client_transport.close()
+            try:
+                client_transport.close()
+            except Exception as e:
+                print(f"[Server] 關閉影像連線時發生錯誤：{e}")
 
         if server_transport is not None:
-            server_transport.close()
+            try:
+                server_transport.close()
+            except Exception as e:
+                print(f"[Server] 關閉 Server 時發生錯誤：{e}")
+
+        if text_sender is not None:
+            try:
+                text_sender.close_connection()
+            except Exception as e:
+                print(f"[TEXT] 關閉文字連線時發生錯誤：{e}")
 
         print("[Server] 連線已關閉")
-        if text_sender is not None:
-           text_sender.close_connection()
+
 
 if __name__ == "__main__":
     main()
